@@ -93,7 +93,7 @@ Specifies how paths are displayed before each file block.
 
 `-p` supports the following modes:
 
-- `releative` (default): relative to execution path
+- `relative` (default): relative to execution path
 - `name`: filename only
 - `absolute`: absolute path
 
