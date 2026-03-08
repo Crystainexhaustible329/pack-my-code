@@ -39,7 +39,7 @@
 ---@field files table<string, TreeNode>|nil
 
 --@description: constants
-local VERSION = "6024" -- 2[6][03][*][08]
+local VERSION = "6026"
 
 --@description: known no-extension files for stats grouping
 local KNOWN_NO_EXT = {
@@ -51,6 +51,13 @@ local KNOWN_NO_EXT = {
     ["license"] = true,
     ["copying"] = true,
     ["changelog"] = true
+}
+
+--@description: lua pattern magic characters
+local LUA_MAGIC_CHARS = {
+    ["^"] = true, ["$"] = true, ["("] = true, [")"] = true,
+    ["%"] = true, ["."] = true, ["["] = true, ["]"] = true,
+    ["+"] = true, ["-"] = true
 }
 
 --@description: path separator by runtime platform
@@ -81,6 +88,15 @@ local function normalizePath(p)
     if #s > 1 then
         s = s:gsub("/$", "")
     end
+    return s
+end
+
+--@description: normalize pattern separators; keep trailing slash semantics
+--@param p string
+--@return: string
+local function normalizePattern(p)
+    local s = p:gsub("\\", "/")
+    s = s:gsub("/+", "/")
     return s
 end
 
@@ -219,14 +235,37 @@ local function parsePatternList(raw)
     for _, part in ipairs(parts) do
         local p = trim(part)
         if p ~= "" then
-            p = normalizePath(p)
+            p = normalizePattern(p)
             table.insert(patterns, p)
         end
     end
     return patterns
 end
 
---@description: escape lua pattern chars except glob symbols
+--@description: append parsed pattern tokens to a list
+--@param dst string[]
+--@param tokens string[]
+--@return: nil
+local function appendPatternTokens(dst, tokens)
+    for _, token in ipairs(tokens) do
+        local pats = parsePatternList(token)
+        for _, p in ipairs(pats) do
+            table.insert(dst, p)
+        end
+    end
+end
+
+--@description: escape one lua pattern magic char
+--@param ch string
+--@return: string
+local function escapeLuaMagicChar(ch)
+    if LUA_MAGIC_CHARS[ch] then
+        return "%" .. ch
+    end
+    return ch
+end
+
+--@description: convert simple glob to lua pattern
 --@param s string
 --@return: string
 local function globToLuaPattern(s)
@@ -238,10 +277,8 @@ local function globToLuaPattern(s)
             table.insert(out, ".*")
         elseif ch == "?" then
             table.insert(out, ".")
-        elseif ch:match("[%^%$%(%)%%%.%[%]%+%-%]") then
-            table.insert(out, "%" .. ch)
         else
-            table.insert(out, ch)
+            table.insert(out, escapeLuaMagicChar(ch))
         end
         i = i + 1
     end
@@ -276,7 +313,7 @@ end
 --@return: boolean
 local function matchOnePattern(rel_path, pattern)
     local rp = normalizePath(rel_path)
-    local pt = normalizePath(pattern)
+    local pt = normalizePattern(pattern)
     local is_dir_pattern = endsWith(pt, "/")
     local basename = baseName(rp)
 
@@ -307,6 +344,11 @@ local function matchOnePattern(rel_path, pattern)
             return true
         end
         return rp:match(lp) ~= nil
+    end
+
+    -- extension shorthand like ".lua"
+    if startsWith(pt, ".") and (not pt:find("/", 1, true)) then
+        return endsWith(basename:lower(), pt:lower())
     end
 
     return basename == pt or rp == pt
@@ -406,10 +448,7 @@ end
 --@param data string
 --@return: boolean
 local function isTextContent(data)
-    if data:find("\0", 1, true) then
-        return false
-    end
-    return true
+    return not data:find("\0", 1, true)
 end
 
 --@description: list files using git (respect .gitignore)
@@ -567,8 +606,7 @@ local function formatDisplayPath(path_mode, cwd_abs, file_abs)
     if path_mode == "name" then
         return baseName(file_abs)
     end
-    local rel = relativePath(cwd_abs, normalizePath(file_abs))
-    return rel
+    return relativePath(cwd_abs, normalizePath(file_abs))
 end
 
 --@description: create default options
@@ -594,6 +632,46 @@ local function makeDefaultOptions()
     }
 end
 
+--@description: collect -m/-x values (supports wildcard expansion on some Windows Lua runtimes)
+--@param argv string[]
+--@param start_i integer
+--@param opt_name string
+--@return: string[] values
+--@return: integer next_i
+--@return: boolean reached_end
+local function collectPatternValues(argv, start_i, opt_name)
+    local vals = {}
+    local i = start_i
+    while i <= #argv do
+        local token = argv[i]
+        if startsWith(token, "-") then
+            break
+        end
+        table.insert(vals, token)
+        i = i + 1
+    end
+    if #vals == 0 then
+        fail("missing value for " .. opt_name)
+    end
+    return vals, i, (i > #argv)
+end
+
+--@description: rough heuristic: token likely a directory/path argument, not a glob pattern
+--@param token string
+--@return: boolean
+local function looksLikePathToken(token)
+    if token == "." or token == ".." then
+        return true
+    end
+    if token:find("/", 1, true) or token:find("\\", 1, true) then
+        return true
+    end
+    if token:match("^%a:[/\\]") then
+        return true
+    end
+    return false
+end
+
 --@description: parse CLI arguments
 --@param argv string[]
 --@return: PmcOptions
@@ -608,40 +686,52 @@ local function parseArgs(argv)
         if a == "-v" then
             opt.show_version = true
             i = i + 1
+
         elseif a == "-h" or a == "--help" then
             opt.show_help = true
             i = i + 1
+
         elseif a == "-x" then
-            local val = argv[i + 1]
-            if not val then
-                fail("missing value for -x")
+            local vals, next_i, reached_end = collectPatternValues(argv, i + 1, "-x")
+
+            -- Compatibility for runtimes that expand *.ext in argv:
+            -- pmc -x *.lua targetDir   -> values may be {"a.lua","b.lua","targetDir"}
+            if reached_end and (not target_set) and #vals >= 2 and looksLikePathToken(vals[#vals]) then
+                opt.target_dir = vals[#vals]
+                target_set = true
+                table.remove(vals, #vals)
             end
-            local pats = parsePatternList(val)
-            for _, p in ipairs(pats) do
-                table.insert(opt.exclude_patterns, p)
-            end
-            i = i + 2
+
+            appendPatternTokens(opt.exclude_patterns, vals)
+            i = next_i
+
         elseif a == "-m" then
-            local val = argv[i + 1]
-            if not val then
-                fail("missing value for -m")
+            local vals, next_i, reached_end = collectPatternValues(argv, i + 1, "-m")
+
+            -- Same compatibility logic as -x
+            if reached_end and (not target_set) and #vals >= 2 and looksLikePathToken(vals[#vals]) then
+                opt.target_dir = vals[#vals]
+                target_set = true
+                table.remove(vals, #vals)
             end
-            local pats = parsePatternList(val)
-            for _, p in ipairs(pats) do
-                table.insert(opt.include_patterns, p)
-            end
-            i = i + 2
+
+            appendPatternTokens(opt.include_patterns, vals)
+            i = next_i
+
         elseif a == "-r" then
             opt.ignore_gitignore = true
             i = i + 1
+
         elseif a == "-t" then
             opt.with_tree = true
             opt.user_set_t = true
             i = i + 1
+
         elseif a == "-s" then
             opt.with_stats = true
             opt.user_set_s = true
             i = i + 1
+
         elseif a == "-w" then
             local val = argv[i + 1]
             if not val then
@@ -654,6 +744,7 @@ local function parseArgs(argv)
             opt.wrap_mode = val
             opt.user_set_w = true
             i = i + 2
+
         elseif a == "-p" then
             local val = argv[i + 1]
             if not val then
@@ -669,9 +760,11 @@ local function parseArgs(argv)
             opt.path_mode = val
             opt.user_set_p = true
             i = i + 2
+
         elseif a == "-y" then
             opt.yaml_mode = true
             i = i + 1
+
         elseif a == "-o" then
             local val = argv[i + 1]
             if not val or trim(val) == "" then
@@ -679,8 +772,10 @@ local function parseArgs(argv)
             end
             opt.output_file = trim(val)
             i = i + 2
+
         elseif startsWith(a, "-") then
             fail("unknown option: " .. a)
+
         else
             if target_set then
                 fail("multiple target directories are not allowed")
