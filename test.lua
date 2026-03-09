@@ -1,731 +1,829 @@
-#!/usr/bin/env lua
+--@description: test.lua - comprehensive test suite for pmc
+--@author: WaterRun
+--@date: 2026-03-09
+
 -- =============================================================================
---  test.lua – Cross-platform test suite for pmc (pack-my-code)
---  Tests ONLY features documented in README.md. No undocumented features.
---  Usage:  lua test.lua
---          lua test.lua -v          (verbose)
---          lua test.lua -f <name>   (filter)
+-- Platform & Constants
 -- =============================================================================
 
----------------------------------------------------------------------------
--- 0. Platform detection
----------------------------------------------------------------------------
-local IS_WIN = (package.config:sub(1, 1) == "\\")
-local SEP    = IS_WIN and "\\" or "/"
-local NULL   = IS_WIN and "NUL" or "/dev/null"
-local PMC    = "lua " .. (arg[0]:match("^(.-)[/\\][^/\\]*$") or ".") .. SEP .. "pmc.lua"
+local DIR_SEP = package.config:sub(1, 1)
+local IS_WINDOWS = (DIR_SEP == "\\")
+local NULL_DEV = IS_WINDOWS and "NUL" or "/dev/null"
 
--- Resolve PMC to absolute path (needed by run_pmc_in which changes CWD)
-local PMC_ABS
-do
-    local pmc_rel_dir = arg[0]:match("^(.-)[/\\][^/\\]*$") or "."
-    local resolve_cmd = IS_WIN
-        and ('cd /d "' .. pmc_rel_dir:gsub("/", "\\") .. '" && cd')
-        or ('cd "' .. pmc_rel_dir .. '" && pwd')
-    local pipe = io.popen(resolve_cmd)
-    if pipe then
-        local abs_dir = (pipe:read("*l") or ""):gsub("[\r\n]+", "")
-        pipe:close()
-        if abs_dir ~= "" then
-            PMC_ABS = "lua \"" .. abs_dir .. SEP .. "pmc.lua\""
-        end
+local PMC_SOURCE = "pmc.lua"
+local PMC_BIN = IS_WINDOWS and "pmc.exe" or "pmc"
+local TEST_DIR = "_pmc_test_workspace"
+local STDOUT_TMP = "_pmc_stdout.tmp"
+local STDERR_TMP = "_pmc_stderr.tmp"
+local OUTPUT_MD = "_pmc_out.md"
+local OUTPUT_YAML = "_pmc_out.yaml"
+local PMC_CMD = nil -- assigned after build
+
+-- =============================================================================
+-- Counters
+-- =============================================================================
+
+local total = 0
+local passed = 0
+local failed = 0
+local fail_names = {}
+
+-- =============================================================================
+-- Utilities
+-- =============================================================================
+
+local function trim(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function sq(s)
+    if IS_WINDOWS then
+        return '"' .. s:gsub('"', '""') .. '"'
     end
-    if not PMC_ABS then PMC_ABS = PMC end
+    return "'" .. s:gsub("'", "'\"'\"'") .. "'"
 end
 
----------------------------------------------------------------------------
--- 1. CLI argument parser
----------------------------------------------------------------------------
-local VERBOSE = false
-local FILTER  = nil
-do
-    local i = 1
-    while i <= #arg do
-        if arg[i] == "-v" or arg[i] == "--verbose" then
-            VERBOSE = true
-        elseif (arg[i] == "-f" or arg[i] == "--filter") and arg[i + 1] then
-            i = i + 1; FILTER = arg[i]
-        end
-        i = i + 1
-    end
+local function osExec(cmd)
+    local r1, _, _ = os.execute(cmd)
+    if type(r1) == "number" then return r1 == 0 end
+    return r1 == true
 end
 
----------------------------------------------------------------------------
--- 2. Filesystem helpers
----------------------------------------------------------------------------
-local function path(...)
-    return table.concat({ ... }, SEP)
+local function readFile(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local data = f:read("*a")
+    f:close()
+    return data or ""
 end
 
-local function mkdir_p(dir)
-    if IS_WIN then
-        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>' .. NULL)
-    else
-        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
-    end
-end
-
-local function rm_rf(dir)
-    if IS_WIN then
-        os.execute('rmdir /s /q "' .. dir:gsub("/", "\\") .. '" 2>' .. NULL)
-    else
-        os.execute('rm -rf "' .. dir .. '" 2>/dev/null')
-    end
-end
-
-local function write_file(fp, content)
-    local parent = fp:match("^(.*)[/\\]")
-    if parent then mkdir_p(parent) end
-    local f = io.open(fp, "wb")
-    if not f then error("cannot write: " .. fp) end
+local function writeFile(path, content)
+    local f = io.open(path, "wb")
+    if not f then error("Cannot write: " .. path) end
     f:write(content)
     f:close()
 end
 
-local function read_file(fp)
-    local f = io.open(fp, "rb")
-    if not f then return nil end
-    local c = f:read("*a"); f:close(); return c
+local function mkdirp(path)
+    if IS_WINDOWS then
+        osExec('mkdir "' .. path:gsub("/", "\\") .. '" 2>NUL')
+    else
+        osExec("mkdir -p " .. sq(path) .. " 2>/dev/null")
+    end
 end
 
-local function file_exists(fp)
-    local f = io.open(fp, "rb")
-    if f then
-        f:close(); return true
+local function rmrf(path)
+    if IS_WINDOWS then
+        osExec('rmdir /s /q "' .. path:gsub("/", "\\") .. '" 2>NUL')
+        osExec('del /f /q "' .. path:gsub("/", "\\") .. '" 2>NUL')
+    else
+        osExec("rm -rf " .. sq(path) .. " 2>/dev/null")
     end
+end
+
+local function fileExists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() return true end
     return false
 end
 
----------------------------------------------------------------------------
--- 3. Run pmc helpers
----------------------------------------------------------------------------
-local function run_pmc(args_str)
-    local tmpout = os.tmpname()
-    local tmperr = os.tmpname()
-    local full = PMC .. " " .. (args_str or "")
-        .. ' >"' .. tmpout .. '" 2>"' .. tmperr .. '"'
-    local ok, _, code = os.execute(full)
-    local exit_code
-    if type(ok) == "number" then
-        exit_code = ok
-    else
-        exit_code = code or 0
-        if not ok and exit_code == 0 then exit_code = 1 end
-    end
-    local stdout = read_file(tmpout) or ""
-    local stderr = read_file(tmperr) or ""
-    os.remove(tmpout); os.remove(tmperr)
-    return { stdout = stdout, stderr = stderr, code = exit_code, ok = (exit_code == 0) }
+-- =============================================================================
+-- Test Infrastructure
+-- =============================================================================
+
+local function runPmc(args)
+    local cmd = PMC_CMD .. " " .. (args or "")
+        .. " >" .. sq(STDOUT_TMP)
+        .. " 2>" .. sq(STDERR_TMP)
+    local ok = osExec(cmd)
+    local stdout = readFile(STDOUT_TMP) or ""
+    local stderr = readFile(STDERR_TMP) or ""
+    stdout = stdout:gsub("\r\n", "\n"):gsub("\r", "\n")
+    stderr = stderr:gsub("\r\n", "\n"):gsub("\r", "\n")
+    os.remove(STDOUT_TMP)
+    os.remove(STDERR_TMP)
+    return ok, stdout, stderr
 end
 
---- Run pmc after cd-ing to `dir`.
---- Prevents Windows CRT glob expansion when `dir` contains no matching files.
---- Uses PMC_ABS so the pmc script is still found after cd.
-local function run_pmc_in(dir, args_str)
-    local tmpout = os.tmpname()
-    local tmperr = os.tmpname()
-    local cd_prefix
-    if IS_WIN then
-        cd_prefix = 'cd /d "' .. dir:gsub("/", "\\") .. '" && '
-    else
-        cd_prefix = 'cd "' .. dir .. '" && '
-    end
-    local full = cd_prefix .. PMC_ABS .. " " .. (args_str or "")
-        .. ' >"' .. tmpout .. '" 2>"' .. tmperr .. '"'
-    local ok, _, code = os.execute(full)
-    local exit_code
-    if type(ok) == "number" then
-        exit_code = ok
-    else
-        exit_code = code or 0
-        if not ok and exit_code == 0 then exit_code = 1 end
-    end
-    local stdout = read_file(tmpout) or ""
-    local stderr = read_file(tmperr) or ""
-    os.remove(tmpout); os.remove(tmperr)
-    return { stdout = stdout, stderr = stderr, code = exit_code, ok = (exit_code == 0) }
+local function contains(s, sub)
+    return s:find(sub, 1, true) ~= nil
 end
 
----------------------------------------------------------------------------
--- 4. Mini test framework
----------------------------------------------------------------------------
-local tests, test_order = {}, {}
-local pass_count, fail_count, skip_count = 0, 0, 0
-local errors = {}
+local function notContains(s, sub)
+    return not contains(s, sub)
+end
+
+local function expect(cond, msg)
+    if not cond then error(msg or "expectation failed", 2) end
+end
 
 local function test(name, fn)
-    tests[name] = fn; table.insert(test_order, name)
-end
-
-local AssertError = {}
-function AssertError.new(msg)
-    return setmetatable({ msg = msg }, { __tostring = function(s) return s.msg end })
-end
-
-local function assert_true(v, m)
-    if not v then error(AssertError.new(m or "expected truthy, got: " .. tostring(v)), 2) end
-end
-local function assert_false(v, m)
-    if v then error(AssertError.new(m or "expected falsy, got: " .. tostring(v)), 2) end
-end
-local function assert_eq(a, b, m)
-    if a ~= b then
-        local d = string.format("expected %q, got %q", tostring(b), tostring(a))
-        error(AssertError.new(m and (m .. ": " .. d) or d), 2)
-    end
-end
-local function assert_contains(h, n, m)
-    if type(h) ~= "string" or not h:find(n, 1, true) then
-        local d = string.format("expected to contain %q", n)
-        error(AssertError.new(m and (m .. ": " .. d) or d), 2)
-    end
-end
-local function assert_not_contains(h, n, m)
-    if type(h) == "string" and h:find(n, 1, true) then
-        local d = string.format("expected NOT to contain %q", n)
-        error(AssertError.new(m and (m .. ": " .. d) or d), 2)
-    end
-end
-local function assert_match(h, p, m)
-    if type(h) ~= "string" or not h:match(p) then
-        local d = string.format("expected to match %q", p)
-        error(AssertError.new(m and (m .. ": " .. d) or d), 2)
-    end
-end
-local function assert_file_exists(fp, m)
-    assert_true(file_exists(fp), m or ("file should exist: " .. fp))
-end
-
----------------------------------------------------------------------------
--- 5. Test fixture
----------------------------------------------------------------------------
-local TEST_ROOT = path(".", ".pmc_test_" .. os.time())
-
-local function create_fixture()
-    rm_rf(TEST_ROOT)
-
-    mkdir_p(path(TEST_ROOT, "src", "utils"))
-    mkdir_p(path(TEST_ROOT, "docs"))
-    mkdir_p(path(TEST_ROOT, "build"))
-    mkdir_p(path(TEST_ROOT, "assets"))
-    mkdir_p(path(TEST_ROOT, "node_modules", "pkg"))
-    mkdir_p(path(TEST_ROOT, ".git", "objects"))
-
-    -- Lua sources
-    write_file(path(TEST_ROOT, "src", "main.lua"),
-        '-- main.lua\nlocal utils = require("utils")\nprint("hello world")\n')
-    write_file(path(TEST_ROOT, "src", "utils", "init.lua"),
-        '-- utils/init.lua\nlocal M = {}\nfunction M.greet(name)\n    return "Hello, " .. name\nend\nreturn M\n')
-    write_file(path(TEST_ROOT, "src", "config.lua"),
-        '-- config.lua\nreturn {\n    version = "1.0.0",\n    debug = false,\n}\n')
-
-    -- Non-Lua text sources
-    write_file(path(TEST_ROOT, "src", "helper.py"),
-        '# helper.py\ndef greet(name):\n    return f"Hello, {name}"\n')
-    write_file(path(TEST_ROOT, "src", "app.js"),
-        '// app.js\nconsole.log("hello from js");\n')
-
-    -- Docs
-    write_file(path(TEST_ROOT, "docs", "guide.md"),
-        "# Project Guide\nThis is the project guide.\n")
-
-    -- Build artefact (binary)
-    write_file(path(TEST_ROOT, "build", "output.bin"),
-        string.rep("\0\xFF", 100))
-
-    -- Asset (binary, not gitignored — tests binary-skip independently)
-    write_file(path(TEST_ROOT, "assets", "logo.png"),
-        "\137PNG\r\n\26\n" .. string.rep("\0", 50))
-
-    -- .git internal (never listed by git ls-files)
-    write_file(path(TEST_ROOT, ".git", "config"),
-        "[core]\nbare = false\n")
-
-    -- node_modules (gitignored)
-    write_file(path(TEST_ROOT, "node_modules", "pkg", "index.js"),
-        "module.exports = {};\n")
-
-    -- .gitignore
-    write_file(path(TEST_ROOT, ".gitignore"),
-        "build/\nnode_modules/\n*.bin\n")
-
-    -- Root text files
-    write_file(path(TEST_ROOT, "README.md"),
-        "# Root README\nPack my code!\n")
-    write_file(path(TEST_ROOT, "Makefile"),
-        "all:\n\tlua src/main.lua\n")
-end
-
-local function destroy_fixture()
-    rm_rf(TEST_ROOT)
-end
-
----------------------------------------------------------------------------
--- 6. Test cases — strictly per README.md
----------------------------------------------------------------------------
-
--- ── Basic usage ─────────────────────────────────────────────────────────
-
-test("basic: runs without error on valid directory", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "exit 0 expected, got " .. r.code .. " stderr: " .. r.stderr)
-end)
-
-test("basic: output contains source file content", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_contains(r.stdout, 'print("hello world")', "main.lua content")
-    assert_contains(r.stdout, "function M.greet(name)", "utils/init.lua content")
-end)
-
-test("basic: output references file paths", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_match(r.stdout, "main%.lua", "references main.lua")
-    assert_match(r.stdout, "config%.lua", "references config.lua")
-end)
-
-test("basic: includes non-Lua text files (py, js, md)", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_contains(r.stdout, "def greet(name)", ".py content")
-    assert_contains(r.stdout, "hello from js", ".js content")
-    assert_contains(r.stdout, "Project Guide", ".md content")
-end)
-
--- ── Default behaviors ───────────────────────────────────────────────────
-
-test("default: follows .gitignore — excludes build/", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_not_contains(r.stdout, string.rep("\0\xFF", 5), "build/ excluded")
-end)
-
-test("default: follows .gitignore — excludes node_modules/", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_not_contains(r.stdout, "module.exports", "node_modules/ excluded")
-end)
-
-test("default: excludes .git directory", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_not_contains(r.stdout, "bare = false", ".git content excluded")
-end)
-
-test("default: skips binary files", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_not_contains(r.stdout, "\0", "no null bytes in output")
-end)
-
-test("default: wrapping equals -w md", function()
-    local r1 = run_pmc('"' .. TEST_ROOT .. '"')
-    local r2 = run_pmc('-w md "' .. TEST_ROOT .. '"')
-    assert_eq(r1.stdout, r2.stdout, "default output = -w md output")
-end)
-
-test("default: path mode equals -p relative", function()
-    local r1 = run_pmc('"' .. TEST_ROOT .. '"')
-    local r2 = run_pmc('-p relative "' .. TEST_ROOT .. '"')
-    assert_eq(r1.stdout, r2.stdout, "default output = -p relative output")
-end)
-
-test("default: no tree structure in output", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_not_contains(r.stdout, "|-- ", "no tree branch markers")
-end)
-
-test("default: no statistics in output", function()
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_not_contains(r.stdout, "STATS:", "no STATS: block")
-end)
-
--- ── -v version ──────────────────────────────────────────────────────────
-
-test("-v: prints version string", function()
-    local r = run_pmc("-v")
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "pmc -- pack-my-code. version", "version format")
-end)
-
--- ── -h / --help ─────────────────────────────────────────────────────────
-
-test("-h: prints help with usage info", function()
-    local r = run_pmc("-h")
-    assert_true(r.ok, "should succeed")
-    assert_match(r.stdout:lower(), "usage", "contains usage")
-end)
-
-test("--help: prints help with usage info", function()
-    local r = run_pmc("--help")
-    assert_true(r.ok, "should succeed")
-    assert_match(r.stdout:lower(), "usage", "contains usage")
-end)
-
--- ── -x exclude ──────────────────────────────────────────────────────────
-
-test("-x: excludes files by glob pattern", function()
-    local r = run_pmc('-x "*.py" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_not_contains(r.stdout, "def greet", ".py excluded")
-    assert_contains(r.stdout, "hello world", ".lua remains")
-end)
-
-test("-x: excludes directory with trailing slash", function()
-    local r = run_pmc('-x "docs/" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_not_contains(r.stdout, "Project Guide", "docs/ excluded")
-end)
-
-test("-x: comma-separated multiple patterns", function()
-    local r = run_pmc('-x "*.py,*.js" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_not_contains(r.stdout, "def greet", ".py excluded")
-    assert_not_contains(r.stdout, "hello from js", ".js excluded")
-    assert_contains(r.stdout, "hello world", ".lua remains")
-end)
-
--- ── -m include only ─────────────────────────────────────────────────────
-
--- NOTE: These two tests use run_pmc_in(TEST_ROOT, ...) to cd into the test
--- fixture before invoking pmc. This prevents the Windows C runtime from
--- glob-expanding "*.lua" against CWD files (pmc.lua, test.lua in the project
--- root). TEST_ROOT has no .lua files at its root level, so expansion is
--- avoided. The target is passed as "." since CWD is now TEST_ROOT.
-
-test("-m: includes only matching files", function()
-    local r = run_pmc_in(TEST_ROOT, '-m "*.lua" .')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "hello world", ".lua included")
-    assert_not_contains(r.stdout, "def greet", ".py excluded")
-    assert_not_contains(r.stdout, "hello from js", ".js excluded")
-end)
-
-test("-m: lower priority than -x (file matching both is excluded)", function()
-    local r = run_pmc_in(TEST_ROOT, '-m "*.lua" -x "config.lua" .')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "hello world", "main.lua kept by -m")
-    assert_not_contains(r.stdout, "debug = false", "config.lua excluded by -x despite -m")
-end)
-
--- ── -r ignore .gitignore ────────────────────────────────────────────────
-
-test("-r: includes files normally excluded by .gitignore", function()
-    local r = run_pmc('-r "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "module.exports", "node_modules content appears with -r")
-end)
-
--- ── -t tree structure ───────────────────────────────────────────────────
-
-test("-t: prepends tree structure before content", function()
-    local r = run_pmc('-t "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    local tree_pos = r.stdout:find("|-- ", 1, true) or r.stdout:find("`-- ", 1, true)
-    local content_pos = r.stdout:find("PATH: ", 1, true)
-    assert_true(tree_pos ~= nil, "tree markers present")
-    assert_true(content_pos ~= nil, "content present")
-    assert_true(tree_pos < content_pos, "tree appears before content")
-end)
-
--- ── -s statistics ───────────────────────────────────────────────────────
-
-test("-s: appends statistics after content", function()
-    local r = run_pmc('-s "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "STATS:", "has STATS:")
-    assert_contains(r.stdout, "total_files:", "has total_files")
-    assert_contains(r.stdout, "total_lines:", "has total_lines")
-    local stats_pos = r.stdout:find("STATS:", 1, true)
-    local path_pos  = r.stdout:find("PATH: ", 1, true)
-    assert_true(stats_pos > path_pos, "stats after content")
-end)
-
--- ── -w wrapping modes ───────────────────────────────────────────────────
-
-test("-w md: PATH header + backtick fence", function()
-    local r = run_pmc('-w md "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "PATH: ", "has PATH: header")
-    assert_contains(r.stdout, "````", "has backtick fence")
-end)
-
-test("-w nil: PATH header, no fence, no block markers", function()
-    local r = run_pmc('-w nil "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "PATH: ", "has PATH: header")
-    assert_not_contains(r.stdout, "````", "no backtick fence")
-    assert_not_contains(r.stdout, "<<<FILE", "no block marker")
-end)
-
-test("-w block: <<<FILE / >>>END markers", function()
-    local r = run_pmc('-w block "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "<<<FILE ", "has <<<FILE")
-    assert_contains(r.stdout, ">>>END", "has >>>END")
-    assert_not_contains(r.stdout, "````", "no backtick fence")
-end)
-
--- ── -p path modes ───────────────────────────────────────────────────────
-
-test("-p name: filename only, no directory separators", function()
-    local r = run_pmc('-p name "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    local p = r.stdout:match("PATH: ([^\n]+)")
-    assert_true(p ~= nil, "has PATH: header")
-    assert_false(p:find("/", 1, true), "no / in filename-only path")
-end)
-
-test("-p absolute: full absolute path in header", function()
-    local r = run_pmc('-p absolute "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    local p = r.stdout:match("PATH: ([^\n]+)")
-    assert_true(p ~= nil, "has PATH: header")
-    if IS_WIN then
-        assert_match(p, "^%a:", "starts with drive letter on Windows")
+    total = total + 1
+    local ok, err = pcall(fn)
+    if ok and err ~= false then
+        passed = passed + 1
+        io.write(string.format("  [PASS] %s\n", name))
     else
-        assert_match(p, "^/", "starts with / on Unix")
+        failed = failed + 1
+        local msg = (type(err) == "string") and err or "assertion failed"
+        io.write(string.format("  [FAIL] %s -- %s\n", name, msg))
+        table.insert(fail_names, name)
     end
-end)
+    io.stdout:flush()
+end
 
--- ── -y YAML mode ────────────────────────────────────────────────────────
+-- =============================================================================
+-- Cleanup helpers (called at end, even on error)
+-- =============================================================================
 
-test("-y -o .yaml: produces YAML structured output", function()
-    local out = path(TEST_ROOT, "_out.yaml")
-    local r = run_pmc('-y -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_file_exists(out)
-    local c = read_file(out)
-    assert_contains(c, "type: directory", "has type: directory")
-    assert_contains(c, "type: file", "has type: file")
-    assert_contains(c, "content: |-", "has block scalar marker")
-    assert_contains(c, "hello world", "has file content")
-    os.remove(out)
-end)
-
-test("-y -o .yml: also accepted", function()
-    local out = path(TEST_ROOT, "_out.yml")
-    local r = run_pmc('-y -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed with .yml extension")
-    assert_file_exists(out)
-    os.remove(out)
-end)
-
-test("-y without -o: fails with error", function()
-    local r = run_pmc('-y "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "should fail without -o")
-    assert_contains(r.stderr, "err:(", "uses err:( format")
-end)
-
-test("-y -o non-yaml extension: fails with error", function()
-    local out = path(TEST_ROOT, "_out.txt")
-    local r = run_pmc('-y -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "should fail with .txt extension")
-    assert_contains(r.stderr, "err:(", "uses err:( format")
-end)
-
-test("-y with -t: fails (incompatible)", function()
-    local out = path(TEST_ROOT, "_out.yaml")
-    local r = run_pmc('-y -t -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "-y and -t incompatible")
-    assert_contains(r.stderr, "err:(", "uses err:( format")
-end)
-
-test("-y with -s: fails (incompatible)", function()
-    local out = path(TEST_ROOT, "_out.yaml")
-    local r = run_pmc('-y -s -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "-y and -s incompatible")
-    assert_contains(r.stderr, "err:(", "uses err:( format")
-end)
-
-test("-y with -w: fails (incompatible)", function()
-    local out = path(TEST_ROOT, "_out.yaml")
-    local r = run_pmc('-y -w md -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "-y and -w incompatible")
-    assert_contains(r.stderr, "err:(", "uses err:( format")
-end)
-
-test("-y with -p: fails (incompatible)", function()
-    local out = path(TEST_ROOT, "_out.yaml")
-    local r = run_pmc('-y -p name -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "-y and -p incompatible")
-    assert_contains(r.stderr, "err:(", "uses err:( format")
-end)
-
--- ── -o output redirection ───────────────────────────────────────────────
-
-test("-o: redirects packed output to file", function()
-    local out = path(TEST_ROOT, "_packed.txt")
-    local r = run_pmc('-o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_file_exists(out)
-    local c = read_file(out)
-    assert_contains(c, "hello world", "file has source content")
-    assert_contains(c, "PATH: ", "file has path headers")
-    os.remove(out)
-end)
-
--- ── Error handling ──────────────────────────────────────────────────────
-
-test("error: nonexistent directory fails", function()
-    local r = run_pmc('"' .. path(TEST_ROOT, "nonexistent_xyz") .. '"')
-    assert_false(r.ok, "should fail")
-end)
-
-test("error: stderr uses err:( format", function()
-    local r = run_pmc('"' .. path(TEST_ROOT, "nonexistent_xyz") .. '"')
-    assert_contains(r.stderr, "err:(", "has err:( prefix")
-end)
-
-test("error: unknown option fails", function()
-    local r = run_pmc('--bogus "' .. TEST_ROOT .. '"')
-    assert_false(r.ok, "should fail for unknown option")
-    assert_contains(r.stderr, "err:(", "has err:( prefix")
-end)
-
--- ── Combination examples (from README) ──────────────────────────────────
-
-test("combo: -t -s produces tree then content then stats", function()
-    local r = run_pmc('-t -s "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    local tree_pos    = r.stdout:find("|-- ", 1, true) or r.stdout:find("`-- ", 1, true)
-    local content_pos = r.stdout:find("PATH: ", 1, true)
-    local stats_pos   = r.stdout:find("STATS:", 1, true)
-    assert_true(tree_pos ~= nil, "tree present")
-    assert_true(content_pos ~= nil, "content present")
-    assert_true(stats_pos ~= nil, "stats present")
-    assert_true(tree_pos < content_pos, "tree before content")
-    assert_true(content_pos < stats_pos, "content before stats")
-end)
-
-test("combo: -r -w block (raw scan + block wrap)", function()
-    local r = run_pmc('-r -w block "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_contains(r.stdout, "<<<FILE ", "block markers present")
-    assert_contains(r.stdout, "module.exports", "gitignored content appears with -r")
-end)
-
-test("combo: -x with -o writes filtered output to file", function()
-    local out = path(TEST_ROOT, "_filtered.md")
-    local r = run_pmc('-x "*.py,*.js" -o "' .. out .. '" "' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "should succeed")
-    assert_file_exists(out)
-    local c = read_file(out)
-    assert_not_contains(c, "def greet", "py excluded in file")
-    assert_not_contains(c, "hello from js", "js excluded in file")
-    assert_contains(c, "hello world", "lua present in file")
-    os.remove(out)
-end)
-
--- ── Edge cases ──────────────────────────────────────────────────────────
-
-test("edge: empty directory — no crash", function()
-    local empty = path(TEST_ROOT, "empty_dir")
-    mkdir_p(empty)
-    local r = run_pmc('"' .. empty .. '"')
-    assert_true(type(r.stdout) == "string", "produces string output")
-end)
-
-test("edge: large file handled without crash", function()
-    local big = path(TEST_ROOT, "src", "big.lua")
-    local lines = {}
-    for i = 1, 5000 do lines[i] = string.format("local x%d = %d", i, i) end
-    write_file(big, table.concat(lines, "\n"))
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_true(r.ok, "no crash on large file")
-    assert_contains(r.stdout, "local x5000 = 5000", "large file content present")
-    os.remove(big)
-end)
-
-test("edge: recurses into deeply nested directories", function()
-    local deep = path(TEST_ROOT, "a", "b", "c", "d")
-    mkdir_p(deep)
-    write_file(path(deep, "deep.lua"), "-- deep nested\nlocal d = true\n")
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_contains(r.stdout, "deep nested", "finds deeply nested file")
-end)
-
-test("edge: filenames with spaces", function()
-    local sp = path(TEST_ROOT, "src", "my module.lua")
-    write_file(sp, "-- file with spaces\nlocal sp = 1\n")
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_contains(r.stdout, "file with spaces", "handles spaces in names")
-    os.remove(sp)
-end)
-
-test("edge: preserves UTF-8 content", function()
-    write_file(path(TEST_ROOT, "src", "i18n.lua"),
-        '-- 你好世界 こんにちは\nlocal g = "Héllo"\n')
-    local r = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_contains(r.stdout, "你好世界", "CJK characters preserved")
-    assert_contains(r.stdout, "Héllo", "accented characters preserved")
-end)
-
-test("edge: deterministic output across runs", function()
-    local r1 = run_pmc('"' .. TEST_ROOT .. '"')
-    local r2 = run_pmc('"' .. TEST_ROOT .. '"')
-    assert_eq(r1.stdout, r2.stdout, "two consecutive runs produce identical output")
-end)
-
----------------------------------------------------------------------------
--- 7. Runner
----------------------------------------------------------------------------
-local function run_tests()
-    io.write("\n" .. string.rep("=", 60) .. "\n")
-    io.write("  pmc test suite\n")
-    io.write(string.rep("=", 60) .. "\n\n")
-
-    create_fixture()
-
-    for _, name in ipairs(test_order) do
-        if FILTER and not name:find(FILTER, 1, true) then
-            -- filtered out, skip silently
-        else
-            io.write(string.format("  %-55s ", name))
-            io.flush()
-            local ok, err = pcall(tests[name])
-            if ok then
-                if err == "skip" then
-                    skip_count = skip_count + 1
-                    io.write("[SKIP]\n")
-                else
-                    pass_count = pass_count + 1
-                    if VERBOSE then
-                        io.write("\27[32m[PASS]\27[0m\n")
-                    else
-                        io.write("[PASS]\n")
-                    end
-                end
-            else
-                fail_count = fail_count + 1
-                local msg = tostring(err)
-                if VERBOSE then
-                    io.write("\27[31m[FAIL]\27[0m\n")
-                    io.write("         " .. msg .. "\n")
-                else
-                    io.write("[FAIL]\n")
-                end
-                table.insert(errors, { name = name, err = msg })
-            end
-        end
+local function cleanupAll()
+    io.write("\nCleaning up...\n")
+    rmrf(TEST_DIR)
+    os.remove(STDOUT_TMP)
+    os.remove(STDERR_TMP)
+    os.remove(OUTPUT_MD)
+    os.remove(OUTPUT_YAML)
+    if fileExists(PMC_BIN) then
+        os.remove(PMC_BIN)
+        io.write("  Removed binary: " .. PMC_BIN .. "\n")
     end
+    io.write("  Done.\n")
+end
 
-    destroy_fixture()
+-- =============================================================================
+-- Test file content definitions
+-- =============================================================================
 
-    io.write("\n" .. string.rep("-", 60) .. "\n")
-    local total = pass_count + fail_count + skip_count
-    io.write(string.format("  Total: %d  |  Pass: %d  |  Fail: %d  |  Skip: %d\n",
-        total, pass_count, fail_count, skip_count))
+local TEST_FILES = {
+    [".gitignore"]             = "*.log\nignored_dir/\n",
+    ["src/main.lua"]           = "local M = {}\n\nfunction M.run()\n  print(\"Hello\")\nend\n\nreturn M\n",
+    ["src/utils.lua"]          = "local U = {}\nfunction U.add(a, b) return a + b end\nreturn U\n",
+    ["src/helper.py"]          = "def greet(name):\n    return f\"Hello, {name}\"\n",
+    ["docs/readme.md"]         = "# Docs\n\nSome documentation.\n",
+    ["config.json"]            = "{\n  \"key\": \"value\"\n}\n",
+    ["data.txt"]               = "Line 1\nLine 2\nLine 3\n",
+    ["empty.txt"]              = "",
+    ["image.png"]              = "FAKE_PNG_BINARY_DATA",
+    ["debug.log"]              = "Log entry here\n",
+    ["ignored_dir/secret.txt"] = "Secret content\n",
+    ["nested/deep/inner.lua"]  = "return 42\n",
+    ["Makefile"]               = "all:\n\t@echo done\n",
+}
 
-    if #errors > 0 then
-        io.write("\n  Failures:\n")
-        for i, e in ipairs(errors) do
-            io.write(string.format("    %d) %s\n       %s\n", i, e.name, e.err))
-        end
-    end
+-- =============================================================================
+-- Main execution
+-- =============================================================================
 
-    io.write(string.rep("-", 60) .. "\n")
-    if fail_count > 0 then
-        io.write("\27[31m  FAILED\27[0m\n\n")
+local function main()
+    io.write("==================================================\n")
+    io.write("           PMC Test Suite\n")
+    io.write("==================================================\n\n")
+
+    -- Check source
+    if not fileExists(PMC_SOURCE) then
+        io.write("ERROR: " .. PMC_SOURCE .. " not found.\n")
+        io.write("       Run test.lua from the project root.\n")
         os.exit(1)
+    end
+
+    -- =========================================================================
+    -- Build
+    -- =========================================================================
+    io.write("[BUILD]\n")
+    local built = osExec("luainstaller build " .. PMC_SOURCE .. " 2>" .. NULL_DEV)
+    if built and fileExists(PMC_BIN) then
+        PMC_CMD = IS_WINDOWS and PMC_BIN or ("./" .. PMC_BIN)
+        if not IS_WINDOWS then
+            osExec("chmod +x " .. sq(PMC_BIN))
+        end
+        io.write("  Binary built: " .. PMC_BIN .. "\n")
     else
-        io.write("\27[32m  ALL PASSED\27[0m\n\n")
-        os.exit(0)
+        io.write("  luainstaller unavailable, falling back to: lua " .. PMC_SOURCE .. "\n")
+        PMC_CMD = "lua " .. PMC_SOURCE
+    end
+
+    -- Quick sanity: can we run it at all?
+    do
+        local ok, out, _ = runPmc("-v")
+        if not ok and trim(out) == "" then
+            io.write("ERROR: cannot execute pmc. Aborting.\n")
+            cleanupAll()
+            os.exit(1)
+        end
+    end
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 1: Info commands (no workspace needed)
+    -- =========================================================================
+    io.write("[GROUP 1] Info commands\n")
+
+    test("T01: -v shows version string", function()
+        local ok, stdout, _ = runPmc("-v")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "pmc -- pack-my-code. version"), "missing version string")
+    end)
+
+    test("T02: -h shows help text", function()
+        local ok, stdout, _ = runPmc("-h")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "Usage:"), "missing Usage:")
+        expect(contains(stdout, "-x"), "missing -x")
+        expect(contains(stdout, "-m"), "missing -m")
+        expect(contains(stdout, "-r"), "missing -r")
+        expect(contains(stdout, "-y"), "missing -y")
+        expect(contains(stdout, "-o"), "missing -o")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Setup workspace
+    -- =========================================================================
+    io.write("[SETUP] Creating test workspace...\n")
+
+    rmrf(TEST_DIR)
+    mkdirp(TEST_DIR)
+    mkdirp(TEST_DIR .. "/src")
+    mkdirp(TEST_DIR .. "/docs")
+    mkdirp(TEST_DIR .. "/nested/deep")
+    mkdirp(TEST_DIR .. "/ignored_dir")
+
+    for rel, content in pairs(TEST_FILES) do
+        writeFile(TEST_DIR .. "/" .. rel, content)
+    end
+
+    -- Git init + add
+    local git_available = osExec("git --version >" .. NULL_DEV .. " 2>" .. NULL_DEV)
+    local git_init_ok = false
+    if git_available then
+        git_init_ok = osExec("git -C " .. sq(TEST_DIR) .. " init >" .. NULL_DEV .. " 2>" .. NULL_DEV)
+        if git_init_ok then
+            osExec("git -C " .. sq(TEST_DIR) .. " config core.autocrlf false 2>" .. NULL_DEV)
+            osExec("git -C " .. sq(TEST_DIR) .. " config user.email test@test.com 2>" .. NULL_DEV)
+            osExec("git -C " .. sq(TEST_DIR) .. " config user.name Test 2>" .. NULL_DEV)
+            osExec("git -C " .. sq(TEST_DIR) .. " add . >" .. NULL_DEV .. " 2>" .. NULL_DEV)
+        end
+    end
+
+    if not git_init_ok then
+        io.write("  WARNING: git init failed; git-dependent tests will fail.\n")
+    end
+    io.write("  Workspace ready.\n\n")
+
+    local TD = sq(TEST_DIR)
+
+    -- =========================================================================
+    -- Group 2: Default behavior (git mode, md wrap, relative paths)
+    -- =========================================================================
+    io.write("[GROUP 2] Default behavior\n")
+
+    test("T03: default run produces PATH headers and md fences", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "PATH: "), "missing PATH header")
+        expect(contains(stdout, "````"), "missing markdown fence")
+    end)
+
+    test("T04: default run omits gitignored .log file", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "debug.log"), "debug.log should be gitignored")
+    end)
+
+    test("T05: default run omits gitignored directory", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "secret.txt"), "ignored_dir/ should be gitignored")
+    end)
+
+    test("T06: default run skips binary extension (image.png)", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "image.png"), "binary file should be skipped")
+    end)
+
+    test("T07: default run includes expected files", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "main.lua"), "main.lua missing")
+        expect(contains(stdout, "config.json"), "config.json missing")
+        expect(contains(stdout, "inner.lua"), "inner.lua missing")
+        expect(contains(stdout, "Makefile"), "Makefile missing")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 3: Wrap modes
+    -- =========================================================================
+    io.write("[GROUP 3] Wrap modes\n")
+
+    test("T08: -w md produces markdown fences with language", function()
+        local ok, stdout, _ = runPmc(TD .. " -w md")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "````lua"), "missing ````lua fence")
+        expect(contains(stdout, "````json"), "missing ````json fence")
+        expect(contains(stdout, "PATH: "), "missing PATH header")
+    end)
+
+    test("T09: -w nil produces PATH but no fences", function()
+        local ok, stdout, _ = runPmc(TD .. " -w nil")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "PATH: "), "missing PATH header")
+        expect(notContains(stdout, "````"), "should have no fences")
+        expect(notContains(stdout, "<<<FILE"), "should have no block markers")
+    end)
+
+    test("T10: -w block produces <<<FILE and >>>END", function()
+        local ok, stdout, _ = runPmc(TD .. " -w block")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "<<<FILE "), "missing <<<FILE marker")
+        expect(contains(stdout, ">>>END"), "missing >>>END marker")
+        expect(notContains(stdout, "````"), "should have no md fences")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 4: Path modes
+    -- =========================================================================
+    io.write("[GROUP 4] Path modes\n")
+
+    test("T11: -p relative shows workspace-relative prefix", function()
+        local ok, stdout, _ = runPmc(TD .. " -p relative")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, TEST_DIR .. "/"), "relative path should contain workspace dir")
+    end)
+
+    test("T12: -p name shows only filenames", function()
+        local ok, stdout, _ = runPmc(TD .. " -p name")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "PATH: main.lua"), "should show bare filename main.lua")
+        expect(contains(stdout, "PATH: config.json"), "should show bare filename config.json")
+        -- should NOT contain directory components in PATH lines
+        expect(notContains(stdout, "PATH: src/"), "name mode should not have dir prefix")
+    end)
+
+    test("T13: -p absolute shows full paths", function()
+        local ok, stdout, _ = runPmc(TD .. " -p absolute")
+        expect(ok, "exit non-zero")
+        if IS_WINDOWS then
+            -- windows absolute paths contain :\  or :/
+            expect(stdout:find("PATH: [A-Za-z]:") ~= nil, "missing drive letter in absolute path")
+        else
+            expect(contains(stdout, "PATH: /"), "missing leading / in absolute path")
+        end
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 5: Tree and Stats
+    -- =========================================================================
+    io.write("[GROUP 5] Tree and Stats\n")
+
+    test("T14: -t outputs tree structure", function()
+        local ok, stdout, _ = runPmc(TD .. " -t")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "|--") or contains(stdout, "`--"), "missing tree branch markers")
+    end)
+
+    test("T15: -t tree starts with dot root", function()
+        local ok, stdout, _ = runPmc(TD .. " -t")
+        expect(ok, "exit non-zero")
+        local first_line = stdout:match("^([^\n]*)")
+        expect(first_line and trim(first_line) == ".", "tree should start with .")
+    end)
+
+    test("T16: -t tree contains directory names", function()
+        local ok, stdout, _ = runPmc(TD .. " -t")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "src/"), "tree should contain src/")
+        expect(contains(stdout, "docs/"), "tree should contain docs/")
+    end)
+
+    test("T17: -s outputs STATS header", function()
+        local ok, stdout, _ = runPmc(TD .. " -s")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "STATS:"), "missing STATS header")
+    end)
+
+    test("T18: -s outputs total_files and total_lines", function()
+        local ok, stdout, _ = runPmc(TD .. " -s")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "total_files:"), "missing total_files")
+        expect(contains(stdout, "total_lines:"), "missing total_lines")
+    end)
+
+    test("T19: -s outputs lines_by_suffix", function()
+        local ok, stdout, _ = runPmc(TD .. " -s")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "lines_by_suffix:"), "missing lines_by_suffix")
+        expect(contains(stdout, ".lua:"), "missing .lua suffix stat")
+    end)
+
+    test("T20: -t -s combined includes both", function()
+        local ok, stdout, _ = runPmc(TD .. " -t -s")
+        expect(ok, "exit non-zero")
+        -- tree at the top
+        expect(contains(stdout, "|--") or contains(stdout, "`--"), "missing tree markers")
+        -- stats at the bottom
+        expect(contains(stdout, "STATS:"), "missing STATS section")
+        -- verify tree comes before stats
+        local tree_pos = stdout:find("|--", 1, true) or stdout:find("`--", 1, true) or 0
+        local stats_pos = stdout:find("STATS:", 1, true) or 0
+        expect(tree_pos < stats_pos, "tree should come before stats")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 6: Exclude patterns
+    -- =========================================================================
+    io.write("[GROUP 6] Exclude patterns (-x)\n")
+
+    test("T21: -x *.py excludes python files", function()
+        local ok, stdout, _ = runPmc(TD .. " -x " .. sq("*.py"))
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "helper.py"), "helper.py should be excluded")
+        expect(contains(stdout, "main.lua"), "main.lua should remain")
+    end)
+
+    test("T22: -x docs/ excludes directory", function()
+        local ok, stdout, _ = runPmc(TD .. " -x " .. sq("docs/"))
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "readme.md"), "docs/readme.md should be excluded")
+        expect(contains(stdout, "main.lua"), "main.lua should remain")
+    end)
+
+    test("T23: -x comma-separated patterns", function()
+        local ok, stdout, _ = runPmc(TD .. " -x " .. sq("*.py,*.txt"))
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "helper.py"), "helper.py should be excluded")
+        expect(notContains(stdout, "data.txt"), "data.txt should be excluded")
+        expect(notContains(stdout, "empty.txt"), "empty.txt should be excluded")
+        expect(contains(stdout, "main.lua"), "main.lua should remain")
+    end)
+
+    test("T24: -x repeated flags", function()
+        local ok, stdout, _ = runPmc(TD .. " -x " .. sq("*.py") .. " -x " .. sq("*.txt"))
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "helper.py"), "helper.py should be excluded")
+        expect(notContains(stdout, "data.txt"), "data.txt should be excluded")
+        expect(contains(stdout, "main.lua"), "main.lua should remain")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 7: Include patterns
+    -- =========================================================================
+    io.write("[GROUP 7] Include patterns (-m)\n")
+
+    test("T25: -m *.lua includes only lua files", function()
+        local ok, stdout, _ = runPmc(TD .. " -m " .. sq("*.lua"))
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "main.lua"), "main.lua should be included")
+        expect(contains(stdout, "utils.lua"), "utils.lua should be included")
+        expect(contains(stdout, "inner.lua"), "inner.lua should be included")
+        expect(notContains(stdout, "helper.py"), "helper.py should not be included")
+        expect(notContains(stdout, "config.json"), "config.json should not be included")
+    end)
+
+    test("T26: -m src/ includes only src directory", function()
+        local ok, stdout, _ = runPmc(TD .. " -m " .. sq("src/"))
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "main.lua"), "src/main.lua should be included")
+        expect(contains(stdout, "helper.py"), "src/helper.py should be included")
+        expect(notContains(stdout, "config.json"), "config.json should not be included")
+        expect(notContains(stdout, "readme.md"), "docs/readme.md should not be included")
+    end)
+
+    test("T27: -m + -x priority (-x wins over -m)", function()
+        local ok, stdout, _ = runPmc(TD .. " -m " .. sq("*.lua") .. " -x " .. sq("utils.lua"))
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "main.lua"), "main.lua should be included")
+        expect(contains(stdout, "inner.lua"), "inner.lua should be included")
+        expect(notContains(stdout, "utils.lua"), "-x should override -m for utils.lua")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 8: Raw mode (-r)
+    -- =========================================================================
+    io.write("[GROUP 8] Raw mode (-r)\n")
+
+    test("T28: -r produces output", function()
+        local ok, stdout, _ = runPmc(TD .. " -r")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "PATH: "), "missing PATH header")
+        expect(contains(stdout, "main.lua"), "missing main.lua")
+    end)
+
+    test("T29: -r includes gitignored .log file", function()
+        local ok, stdout, _ = runPmc(TD .. " -r")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "debug.log"), "debug.log should appear in raw mode")
+    end)
+
+    test("T30: -r includes gitignored directory contents", function()
+        local ok, stdout, _ = runPmc(TD .. " -r")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "secret.txt"), "ignored_dir/secret.txt should appear in raw mode")
+    end)
+
+    test("T31: -r still skips binary extensions", function()
+        local ok, stdout, _ = runPmc(TD .. " -r")
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "image.png"), "binary ext should still be skipped in raw mode")
+    end)
+
+    test("T32: -r auto-excludes .git directory", function()
+        local ok, stdout, _ = runPmc(TD .. " -r")
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "COMMIT_EDITMSG"), ".git/ internals should be excluded")
+        expect(notContains(stdout, "HEAD"), ".git/HEAD should be excluded")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 9: Output redirection (-o)
+    -- =========================================================================
+    io.write("[GROUP 9] Output redirection (-o)\n")
+
+    test("T33: -o writes output to file", function()
+        os.remove(OUTPUT_MD)
+        local ok, stdout, _ = runPmc(TD .. " -o " .. sq(OUTPUT_MD))
+        expect(ok, "exit non-zero")
+        expect(fileExists(OUTPUT_MD), "output file should exist")
+        local content = readFile(OUTPUT_MD)
+        expect(content and #content > 0, "output file should have content")
+        os.remove(OUTPUT_MD)
+    end)
+
+    test("T34: -o stdout is empty", function()
+        os.remove(OUTPUT_MD)
+        local ok, stdout, _ = runPmc(TD .. " -o " .. sq(OUTPUT_MD))
+        expect(ok, "exit non-zero")
+        expect(trim(stdout) == "", "stdout should be empty with -o")
+        os.remove(OUTPUT_MD)
+    end)
+
+    test("T35: -o file content matches direct stdout", function()
+        -- Run without -o to get stdout
+        local ok1, stdout1, _ = runPmc(TD)
+        expect(ok1, "direct run failed")
+
+        -- Run with -o
+        os.remove(OUTPUT_MD)
+        local ok2, _, _ = runPmc(TD .. " -o " .. sq(OUTPUT_MD))
+        expect(ok2, "redirect run failed")
+
+        local file_content = readFile(OUTPUT_MD) or ""
+        file_content = file_content:gsub("\r\n", "\n"):gsub("\r", "\n")
+        expect(trim(stdout1) == trim(file_content), "file content should match stdout")
+        os.remove(OUTPUT_MD)
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 10: YAML mode (-y)
+    -- =========================================================================
+    io.write("[GROUP 10] YAML mode (-y)\n")
+
+    test("T36: -y -o creates yaml file", function()
+        os.remove(OUTPUT_YAML)
+        local ok, stdout, _ = runPmc(TD .. " -y -o " .. sq(OUTPUT_YAML))
+        expect(ok, "exit non-zero")
+        expect(fileExists(OUTPUT_YAML), "yaml file should exist")
+        local content = readFile(OUTPUT_YAML)
+        expect(content and #content > 0, "yaml file should have content")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    test("T37: -y output has type: directory root", function()
+        os.remove(OUTPUT_YAML)
+        local ok, _, _ = runPmc(TD .. " -y -o " .. sq(OUTPUT_YAML))
+        expect(ok, "exit non-zero")
+        local content = readFile(OUTPUT_YAML) or ""
+        content = content:gsub("\r\n", "\n")
+        expect(contains(content, "type: directory"), "missing type: directory")
+        expect(contains(content, "children:"), "missing children:")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    test("T38: -y output has file entries with content", function()
+        os.remove(OUTPUT_YAML)
+        local ok, _, _ = runPmc(TD .. " -y -o " .. sq(OUTPUT_YAML))
+        expect(ok, "exit non-zero")
+        local content = readFile(OUTPUT_YAML) or ""
+        content = content:gsub("\r\n", "\n")
+        expect(contains(content, "type: file"), "missing type: file")
+        expect(contains(content, "content: |-"), "missing content: |-")
+        expect(contains(content, "main.lua"), "missing main.lua in yaml")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 11: Error handling
+    -- =========================================================================
+    io.write("[GROUP 11] Error handling\n")
+
+    test("T39: error: -y without -o", function()
+        local ok, _, stderr = runPmc(TD .. " -y")
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+    end)
+
+    test("T40: error: -y with -t", function()
+        os.remove(OUTPUT_YAML)
+        local ok, _, stderr = runPmc(TD .. " -y -t -o " .. sq(OUTPUT_YAML))
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    test("T41: error: -y with -s", function()
+        os.remove(OUTPUT_YAML)
+        local ok, _, stderr = runPmc(TD .. " -y -s -o " .. sq(OUTPUT_YAML))
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    test("T42: error: -y with -w", function()
+        os.remove(OUTPUT_YAML)
+        local ok, _, stderr = runPmc(TD .. " -y -w nil -o " .. sq(OUTPUT_YAML))
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    test("T43: error: -y with -p", function()
+        os.remove(OUTPUT_YAML)
+        local ok, _, stderr = runPmc(TD .. " -y -p name -o " .. sq(OUTPUT_YAML))
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+        os.remove(OUTPUT_YAML)
+    end)
+
+    test("T44: error: -y -o with non-yaml extension", function()
+        local ok, _, stderr = runPmc(TD .. " -y -o " .. sq("_test_bad.txt"))
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+        os.remove("_test_bad.txt")
+    end)
+
+    test("T45: error: unknown option", function()
+        local ok, _, stderr = runPmc(TD .. " -z")
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+    end)
+
+    test("T46: error: -w with invalid mode", function()
+        local ok, _, stderr = runPmc(TD .. " -w banana")
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+    end)
+
+    test("T47: error: -p with invalid mode", function()
+        local ok, _, stderr = runPmc(TD .. " -p banana")
+        expect(not ok, "should fail")
+        expect(contains(stderr, "err:("), "missing error prefix")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Group 12: Edge cases
+    -- =========================================================================
+    io.write("[GROUP 12] Edge cases\n")
+
+    test("T48: empty file is included in output", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "empty.txt"), "empty.txt should appear")
+    end)
+
+    test("T49: nested deep file found", function()
+        local ok, stdout, _ = runPmc(TD)
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "inner.lua"), "nested/deep/inner.lua should appear")
+    end)
+
+    test("T50: md fence includes language (lua)", function()
+        local ok, stdout, _ = runPmc(TD .. " -w md")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "````lua"), "should have ````lua fence")
+    end)
+
+    test("T51: md fence includes language (python)", function()
+        local ok, stdout, _ = runPmc(TD .. " -w md")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "````python"), "should have ````python fence")
+    end)
+
+    test("T52: md fence includes language (makefile)", function()
+        local ok, stdout, _ = runPmc(TD .. " -w md")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "````makefile"), "should have ````makefile fence")
+    end)
+
+    test("T53: md fence includes language (markdown)", function()
+        local ok, stdout, _ = runPmc(TD .. " -w md")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "````markdown"), "should have ````markdown fence")
+    end)
+
+    test("T54: file content is correct in output", function()
+        local ok, stdout, _ = runPmc(TD .. " -w nil")
+        expect(ok, "exit non-zero")
+        -- Check content from inner.lua
+        expect(contains(stdout, "return 42"), "inner.lua content should be present")
+        -- Check content from config.json
+        expect(contains(stdout, '"key"'), "config.json content should be present")
+    end)
+
+    test("T55: -x with extension shorthand .py", function()
+        local ok, stdout, _ = runPmc(TD .. " -x " .. sq(".py"))
+        expect(ok, "exit non-zero")
+        expect(notContains(stdout, "helper.py"), ".py should be excluded by shorthand")
+        expect(contains(stdout, "main.lua"), "non-.py files should remain")
+    end)
+
+    test("T56: -r -w block combined", function()
+        local ok, stdout, _ = runPmc(TD .. " -r -w block")
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "<<<FILE "), "missing block markers in -r -w block")
+        expect(contains(stdout, ">>>END"), "missing >>>END in -r -w block")
+        expect(contains(stdout, "debug.log"), "debug.log should appear in raw mode")
+    end)
+
+    test("T57: -m with comma-separated mixed patterns", function()
+        local ok, stdout, _ = runPmc(TD .. " -m " .. sq("src/,*.json"))
+        expect(ok, "exit non-zero")
+        expect(contains(stdout, "main.lua"), "src/main.lua should be included")
+        expect(contains(stdout, "helper.py"), "src/helper.py should be included")
+        expect(contains(stdout, "config.json"), "config.json should be included")
+        expect(notContains(stdout, "readme.md"), "docs/readme.md should not be included")
+        expect(notContains(stdout, "data.txt"), "data.txt should not be included")
+    end)
+
+    test("T58: -t -s -w nil -p name combined", function()
+        local ok, stdout, _ = runPmc(TD .. " -t -s -w nil -p name")
+        expect(ok, "exit non-zero")
+        -- tree present
+        expect(contains(stdout, "|--") or contains(stdout, "`--"), "missing tree markers")
+        -- stats present
+        expect(contains(stdout, "STATS:"), "missing STATS")
+        -- no fences (nil mode)
+        expect(notContains(stdout, "````"), "should have no fences in nil mode")
+        -- name-only paths
+        expect(contains(stdout, "PATH: main.lua"), "should show name-only path")
+    end)
+
+    io.write("\n")
+
+    -- =========================================================================
+    -- Summary
+    -- =========================================================================
+    io.write("==================================================\n")
+    io.write(string.format("  Results: %d / %d passed", passed, total))
+    if failed > 0 then
+        io.write(string.format(", %d FAILED", failed))
+    end
+    io.write("\n")
+
+    if #fail_names > 0 then
+        io.write("\n  Failed tests:\n")
+        for _, name in ipairs(fail_names) do
+            io.write("    - " .. name .. "\n")
+        end
+    end
+
+    io.write("==================================================\n")
+
+    -- =========================================================================
+    -- Cleanup
+    -- =========================================================================
+    cleanupAll()
+
+    if failed > 0 then
+        os.exit(1)
     end
 end
 
-run_tests()
+-- Run with pcall to ensure cleanup even on unexpected errors
+local run_ok, run_err = pcall(main)
+if not run_ok then
+    io.write("\nFATAL ERROR: " .. tostring(run_err) .. "\n")
+    cleanupAll()
+    os.exit(2)
+end
