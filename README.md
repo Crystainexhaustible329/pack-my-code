@@ -4,7 +4,7 @@
 
 Download the version for your operating system from the [Releases](https://github.com/Water-Run/pack-my-code/releases) page, then add it to your environment variables.
 
-> To use the full functionality of `pmc`, your device needs a `git` environment.
+> To use the default behavior of `pmc`, your device needs a `git` environment.
 
 After installation, you can run `pmc -v` to verify it.  
 If installed correctly, it will output: `pmc -- pack-my-code. version <your version number>`.
@@ -32,7 +32,7 @@ pmc ./src
 - Uses `markdown` as the wrapping format
 - Uses paths relative to the execution directory
 
-When an error occurs, `pmc` outputs corresponding information, for example: `err:( <error message>`.
+When an error occurs, `pmc` outputs corresponding information, for example: `err:( <error message> )`.
 
 ## Options
 
@@ -64,10 +64,13 @@ pmc . -m "src/,README.md"
 
 ### `-r`: Ignore `.gitignore`
 
-By default, `pmc` follows `.gitignore`.  
-With `-r`, it no longer reads `.gitignore`; it scans directories directly and applies other rules.
+By default, `pmc` follows `.gitignore` through `git`.  
+With `-r`, it performs a direct filesystem scan and ignores `.gitignore`.
 
-> This feature requires `git` to be available.
+This option is useful when:
+
+- the directory is not inside a git repository
+- `git` is not available
 
 ### `-t`: Output Tree Structure at the Beginning
 
@@ -157,3 +160,11 @@ Export in YAML mode:
 ```bash
 pmc . -y -o context.yaml
 ```
+
+## Notice
+
+- Files larger than **1 MB** are automatically skipped.
+- Known binary formats and files containing null bytes are skipped.
+- Files are assumed to be **UTF‑8 compatible text**.
+- Very large repositories may produce large outputs; consider using `-x` or `-m` to limit scope.
+- Pattern syntax supports `*`, `**`, and `?`, but not advanced glob expressions such as `{}` or `[]`.
